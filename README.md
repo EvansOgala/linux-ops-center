@@ -9,7 +9,7 @@ A Python desktop app with three operations-focused tabs:
 ## Run
 
 ```bash
-cd /home/evans/Documents/linux-ops-center
+cd /home/'your username'/Documents/linux-ops-center
 python3 main.py
 ```
 
