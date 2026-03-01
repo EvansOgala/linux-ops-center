@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.evans.LinuxOpsCenter</id>
+  <name>Linux Ops Center</name>
+  <summary>Systemd service control, disk usage analysis, and package auditing</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <launchable type="desktop-id">org.evans.LinuxOpsCenter.desktop</launchable>
+  <provides>
+    <binary>org.evans.LinuxOpsCenter</binary>
+  </provides>
+  <description>
+    <p>
+      Linux Ops Center combines service operations, disk usage visibility,
+      and package manager auditing in one desktop utility.
+    </p>
+  </description>
+  <developer id="org.evans">
+    <name>Evans</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="1.0.0" date="2026-02-28"/>
+  </releases>
+</component>

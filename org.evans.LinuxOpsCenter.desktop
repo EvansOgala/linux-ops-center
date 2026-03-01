@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Linux Ops Center
+Comment=Systemd dashboard, disk visualizer, and package audit
+Exec=org.evans.LinuxOpsCenter
+Icon=org.evans.LinuxOpsCenter
+Terminal=false
+Categories=Utility;System;Monitor;
+StartupNotify=true
+StartupWMClass=LinuxOpsCenter
