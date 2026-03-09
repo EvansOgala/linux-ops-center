@@ -1,7 +1,12 @@
+from __future__ import annotations
+
 import threading
-import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+from gi.repository import GLib, Gtk
 
 from disk_audit import human_size, scan_disk
 from package_audit import (
@@ -13,617 +18,533 @@ from package_audit import (
 )
 from service_ops import has_systemd, list_services, read_service_logs, run_service_action
 from settings import load_settings, save_settings
-
-THEMES = {
-    "dark": {
-        "root": "#0f172a",
-        "panel": "#111827",
-        "card": "#0b1220",
-        "line": "#1f2937",
-        "text": "#e2e8f0",
-        "muted": "#94a3b8",
-        "entry": "#020617",
-        "entry_fg": "#dbeafe",
-        "accent": "#2563eb",
-        "accent_hover": "#3b82f6",
-        "accent_press": "#1d4ed8",
-        "accent_text": "#eff6ff",
-        "select": "#2563eb",
-        "warn": "#f87171",
-    },
-    "light": {
-        "root": "#f1f5f9",
-        "panel": "#ffffff",
-        "card": "#f8fafc",
-        "line": "#dbe3ee",
-        "text": "#0f172a",
-        "muted": "#475569",
-        "entry": "#ffffff",
-        "entry_fg": "#0f172a",
-        "accent": "#2563eb",
-        "accent_hover": "#3b82f6",
-        "accent_press": "#1d4ed8",
-        "accent_text": "#eff6ff",
-        "select": "#93c5fd",
-        "warn": "#dc2626",
-    },
-}
+from gtk_style import install_material_smooth_css
 
 
-class RoundedButton(tk.Canvas):
-    def __init__(self, parent, text, command, width=118, height=34, radius=14):
-        super().__init__(parent, width=width, height=height, bd=0, highlightthickness=0, relief="flat", cursor="hand2")
-        self.command = command
-        self.text = text
-        self.width = width
-        self.height = height
-        self.radius = radius
-        self.pressed = False
-        self.enabled = True
-        self.colors = {
-            "bg": "#2563eb",
-            "hover": "#3b82f6",
-            "press": "#1d4ed8",
-            "fg": "#eff6ff",
-            "container": "#0f172a",
-            "disabled": "#475569",
-        }
-        self.bind("<Enter>", self._on_enter)
-        self.bind("<Leave>", self._on_leave)
-        self.bind("<ButtonPress-1>", self._on_press)
-        self.bind("<ButtonRelease-1>", self._on_release)
-        self._draw()
-
-    def configure_theme(self, palette, container_bg):
-        self.colors.update(
-            {
-                "bg": palette["accent"],
-                "hover": palette["accent_hover"],
-                "press": palette["accent_press"],
-                "fg": palette["accent_text"],
-                "container": container_bg,
-            }
-        )
-        self._draw()
-
-    def set_enabled(self, enabled: bool):
-        self.enabled = enabled
-        self.configure(cursor="hand2" if enabled else "arrow")
-        self._draw()
-
-    def _rounded(self, color):
-        w, h, r = self.width, self.height, self.radius
-        self.create_arc(0, 0, 2 * r, 2 * r, start=90, extent=90, fill=color, outline=color)
-        self.create_arc(w - 2 * r, 0, w, 2 * r, start=0, extent=90, fill=color, outline=color)
-        self.create_arc(0, h - 2 * r, 2 * r, h, start=180, extent=90, fill=color, outline=color)
-        self.create_arc(w - 2 * r, h - 2 * r, w, h, start=270, extent=90, fill=color, outline=color)
-        self.create_rectangle(r, 0, w - r, h, fill=color, outline=color)
-        self.create_rectangle(0, r, w, h - r, fill=color, outline=color)
-
-    def _draw(self):
-        self.delete("all")
-        self.configure(bg=self.colors["container"])
-        color = self.colors["disabled"] if not self.enabled else (self.colors["press"] if self.pressed else self.colors["bg"])
-        self._rounded(color)
-        self.create_text(self.width // 2, self.height // 2, text=self.text, fill=self.colors["fg"], font=("Adwaita Sans", 10, "bold"))
-
-    def _on_enter(self, _event):
-        if self.enabled and not self.pressed:
-            self.delete("all")
-            self.configure(bg=self.colors["container"])
-            self._rounded(self.colors["hover"])
-            self.create_text(self.width // 2, self.height // 2, text=self.text, fill=self.colors["fg"], font=("Adwaita Sans", 10, "bold"))
-
-    def _on_leave(self, _event):
-        self.pressed = False
-        self._draw()
-
-    def _on_press(self, _event):
-        if not self.enabled:
-            return
-        self.pressed = True
-        self._draw()
-
-    def _on_release(self, _event):
-        if not self.enabled:
-            return
-        run = self.pressed
-        self.pressed = False
-        self._draw()
-        if run:
-            self.command()
-
-
-class LinuxOpsCenterApp:
-    def __init__(self, root: tk.Tk):
-        self.root = root
-        self.root.title("Linux Ops Center")
-        self.root.geometry("1280x840")
-        self.root.minsize(1050, 680)
+class LinuxOpsCenterApp(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id="org.evans.LinuxOpsCenter")
+        self.window: Gtk.ApplicationWindow | None = None
 
         self.settings = load_settings()
-        self.theme_var = tk.StringVar(value=self.settings.get("theme", "dark"))
-        self.service_search_var = tk.StringVar(value=self.settings.get("service_search", ""))
-        self.service_state_var = tk.StringVar(value=self.settings.get("service_state_filter", "all"))
-        self.scan_path_var = tk.StringVar(value=self.settings.get("scan_path", str(Path.home())))
-        self.show_hidden_var = tk.BooleanVar(value=bool(self.settings.get("show_hidden", False)))
+        self.theme_values = ["dark", "light"]
+        self.service_state_values = ["all", "running", "failed", "inactive"]
+        self.css_provider = None
 
         self.managers: list[str] = []
-        self.round_buttons: list[RoundedButton] = []
+        self.service_row_units: dict[str, str] = {}
 
-        self._build_ui()
-        self.apply_theme(self.theme_var.get())
+        self.theme_dropdown: Gtk.DropDown | None = None
+        self.status_label: Gtk.Label | None = None
 
-        self.refresh_services()
-        self.scan_disk()
-        self.refresh_packages()
+        self.service_search_entry: Gtk.Entry | None = None
+        self.service_state_dropdown: Gtk.DropDown | None = None
+        self.service_list: Gtk.ListBox | None = None
+        self.logs_view: Gtk.TextView | None = None
 
-    def _add_btn(self, btn: RoundedButton):
-        self.round_buttons.append(btn)
-        return btn
+        self.path_entry: Gtk.Entry | None = None
+        self.hidden_switch: Gtk.Switch | None = None
+        self.disk_summary_label: Gtk.Label | None = None
+        self.disk_top_view: Gtk.TextView | None = None
+        self.disk_files_view: Gtk.TextView | None = None
+
+        self.pkg_detected_label: Gtk.Label | None = None
+        self.pkg_view: Gtk.TextView | None = None
+
+        self.btn_system_upgrade: Gtk.Button | None = None
+        self.btn_flatpak_upgrade: Gtk.Button | None = None
+        self.btn_cleanup: Gtk.Button | None = None
+
+    def do_activate(self):
+        if self.window is None:
+            self._build_ui()
+            self.refresh_services()
+            self.scan_disk()
+            self.refresh_packages()
+        self.window.present()
 
     def _build_ui(self):
-        self.style = ttk.Style()
-        self.style.theme_use("clam")
+        self.window = Gtk.ApplicationWindow(application=self)
+        self.window.set_title("Linux Ops Center")
+        self.window.set_default_size(1300, 860)
+        self.css_provider = install_material_smooth_css(self.window)
 
-        self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(1, weight=1)
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        root.set_margin_top(12)
+        root.set_margin_bottom(12)
+        root.set_margin_start(12)
+        root.set_margin_end(12)
+        self.window.set_child(root)
 
-        self.header = tk.Frame(self.root, padx=14, pady=12)
-        self.header.grid(row=0, column=0, sticky="ew")
-        self.header.columnconfigure(1, weight=1)
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        root.append(header)
 
-        self.title = tk.Label(self.header, text="Linux Ops Center", font=("Adwaita Sans", 24, "bold"))
-        self.title.grid(row=0, column=0, sticky="w")
+        title_wrap = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        header.append(title_wrap)
 
-        self.subtitle = tk.Label(self.header, text="Systemd dashboard, disk usage visualizer, package audit", font=("Adwaita Sans", 10))
-        self.subtitle.grid(row=1, column=0, sticky="w", pady=(2, 0))
+        title = Gtk.Label(label="Linux Ops Center")
+        title.set_xalign(0.0)
+        title.add_css_class("title-2")
+        title_wrap.append(title)
 
-        self.theme_box = ttk.Combobox(self.header, textvariable=self.theme_var, values=("dark", "light"), state="readonly", width=10, style="App.TCombobox")
-        self.theme_box.grid(row=0, column=2, rowspan=2, sticky="e")
-        self.theme_box.bind("<<ComboboxSelected>>", lambda _e: self.apply_theme(self.theme_var.get()))
+        subtitle = Gtk.Label(label="Systemd dashboard, disk usage visualizer, package audit")
+        subtitle.set_xalign(0.0)
+        subtitle.add_css_class("dim-label")
+        title_wrap.append(subtitle)
 
-        self.tabs = ttk.Notebook(self.root)
-        self.tabs.grid(row=1, column=0, sticky="nsew", padx=14, pady=(0, 12))
+        spacer = Gtk.Box()
+        spacer.set_hexpand(True)
+        header.append(spacer)
 
-        self._build_services_tab()
-        self._build_disk_tab()
-        self._build_package_tab()
+        self.theme_dropdown = Gtk.DropDown.new_from_strings(self.theme_values)
+        self._set_dropdown_value(self.theme_dropdown, self.theme_values, self.settings.get("theme", "dark"))
+        self.theme_dropdown.connect("notify::selected", self._on_theme_changed)
+        header.append(self.theme_dropdown)
 
-        self.status_var = tk.StringVar(value="Ready")
-        self.status = tk.Label(self.root, textvariable=self.status_var, anchor="w", padx=14, pady=8, font=("Adwaita Sans", 10))
-        self.status.grid(row=2, column=0, sticky="ew")
+        notebook = Gtk.Notebook()
+        notebook.set_hexpand(True)
+        notebook.set_vexpand(True)
+        root.append(notebook)
 
-    def _build_services_tab(self):
-        tab = tk.Frame(self.tabs)
-        tab.columnconfigure(0, weight=1)
-        tab.rowconfigure(2, weight=3)
-        tab.rowconfigure(3, weight=2)
-        self.tabs.add(tab, text="Systemd")
-        self.tab_systemd = tab
+        notebook.append_page(self._build_services_tab(), Gtk.Label(label="Systemd"))
+        notebook.append_page(self._build_disk_tab(), Gtk.Label(label="Disk"))
+        notebook.append_page(self._build_packages_tab(), Gtk.Label(label="Packages"))
 
-        controls = tk.Frame(tab, padx=12, pady=10)
-        controls.grid(row=0, column=0, sticky="ew")
+        self.status_label = Gtk.Label(label="Ready")
+        self.status_label.set_xalign(0.0)
+        self.status_label.add_css_class("dim-label")
+        root.append(self.status_label)
 
-        self.lbl_search = tk.Label(controls, text="Search", font=("Adwaita Sans", 10, "bold"))
-        self.lbl_search.pack(side="left")
-        self.entry_service_search = tk.Entry(controls, textvariable=self.service_search_var, font=("Adwaita Sans", 10), width=26)
-        self.entry_service_search.pack(side="left", padx=(6, 12))
-        self.entry_service_search.bind("<Return>", lambda _e: self.refresh_services())
+        self._apply_theme(self.settings.get("theme", "dark"))
 
-        self.lbl_state = tk.Label(controls, text="State", font=("Adwaita Sans", 10, "bold"))
-        self.lbl_state.pack(side="left")
-        self.box_service_state = ttk.Combobox(controls, textvariable=self.service_state_var, values=("all", "running", "failed", "inactive"), state="readonly", width=10, style="App.TCombobox")
-        self.box_service_state.pack(side="left", padx=(6, 10))
-        self.box_service_state.bind("<<ComboboxSelected>>", lambda _e: self.refresh_services())
+    def _build_services_tab(self) -> Gtk.Widget:
+        tab = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        tab.set_margin_top(10)
+        tab.set_margin_bottom(10)
+        tab.set_margin_start(10)
+        tab.set_margin_end(10)
 
-        self.btn_refresh_services = self._add_btn(RoundedButton(controls, "Refresh", self.refresh_services, width=96))
-        self.btn_refresh_services.pack(side="left")
+        controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        tab.append(controls)
 
-        actions = tk.Frame(tab, padx=12, pady=4)
-        actions.grid(row=1, column=0, sticky="ew")
+        controls.append(Gtk.Label(label="Search"))
+        self.service_search_entry = Gtk.Entry()
+        self.service_search_entry.set_hexpand(True)
+        self.service_search_entry.set_text(str(self.settings.get("service_search", "")))
+        self.service_search_entry.connect("activate", lambda _e: self.refresh_services())
+        controls.append(self.service_search_entry)
 
-        self.btn_start = self._add_btn(RoundedButton(actions, "Start", lambda: self._do_service_action("start"), width=90))
-        self.btn_stop = self._add_btn(RoundedButton(actions, "Stop", lambda: self._do_service_action("stop"), width=90))
-        self.btn_restart = self._add_btn(RoundedButton(actions, "Restart", lambda: self._do_service_action("restart"), width=90))
-        self.btn_enable = self._add_btn(RoundedButton(actions, "Enable", lambda: self._do_service_action("enable"), width=90))
-        self.btn_disable = self._add_btn(RoundedButton(actions, "Disable", lambda: self._do_service_action("disable"), width=90))
-        self.btn_logs = self._add_btn(RoundedButton(actions, "Show Logs", self.show_selected_logs, width=108))
-
-        for btn in (self.btn_start, self.btn_stop, self.btn_restart, self.btn_enable, self.btn_disable, self.btn_logs):
-            btn.pack(side="left", padx=(0, 8))
-
-        table_frame = tk.Frame(tab, padx=12, pady=6)
-        table_frame.grid(row=2, column=0, sticky="nsew")
-        table_frame.columnconfigure(0, weight=1)
-        table_frame.rowconfigure(0, weight=1)
-
-        self.service_tree = ttk.Treeview(
-            table_frame,
-            columns=("unit", "load", "active", "sub", "description"),
-            show="headings",
-            style="App.Treeview",
+        controls.append(Gtk.Label(label="State"))
+        self.service_state_dropdown = Gtk.DropDown.new_from_strings(self.service_state_values)
+        self._set_dropdown_value(
+            self.service_state_dropdown,
+            self.service_state_values,
+            str(self.settings.get("service_state_filter", "all")),
         )
-        for col, text, width in (
-            ("unit", "Service", 250),
-            ("load", "Load", 90),
-            ("active", "Active", 90),
-            ("sub", "Sub", 130),
-            ("description", "Description", 500),
-        ):
-            self.service_tree.heading(col, text=text)
-            self.service_tree.column(col, width=width, anchor="w")
-        self.service_tree.grid(row=0, column=0, sticky="nsew")
-        self.service_tree.bind("<Double-1>", lambda _e: self.show_selected_logs())
+        self.service_state_dropdown.connect("notify::selected", lambda _d, _p: self.refresh_services())
+        controls.append(self.service_state_dropdown)
 
-        s1 = ttk.Scrollbar(table_frame, orient="vertical", command=self.service_tree.yview)
-        self.service_tree.configure(yscrollcommand=s1.set)
-        s1.grid(row=0, column=1, sticky="ns")
+        refresh_btn = Gtk.Button(label="Refresh")
+        refresh_btn.connect("clicked", lambda _b: self.refresh_services())
+        controls.append(refresh_btn)
 
-        logs_frame = tk.LabelFrame(tab, text="Service Logs", padx=10, pady=8)
-        logs_frame.grid(row=3, column=0, sticky="nsew", padx=12, pady=(0, 8))
-        logs_frame.columnconfigure(0, weight=1)
-        logs_frame.rowconfigure(0, weight=1)
-        self.logs_frame = logs_frame
+        split = Gtk.Paned.new(Gtk.Orientation.VERTICAL)
+        split.set_hexpand(True)
+        split.set_vexpand(True)
+        tab.append(split)
 
-        self.logs_text = tk.Text(logs_frame, wrap="word", font=("Adwaita Mono", 10), state="disabled")
-        self.logs_text.grid(row=0, column=0, sticky="nsew")
-        s2 = ttk.Scrollbar(logs_frame, orient="vertical", command=self.logs_text.yview)
-        self.logs_text.configure(yscrollcommand=s2.set)
-        s2.grid(row=0, column=1, sticky="ns")
+        services_frame = Gtk.Frame(label="Services")
+        split.set_start_child(services_frame)
 
-    def _build_disk_tab(self):
-        tab = tk.Frame(self.tabs)
-        tab.columnconfigure(0, weight=1)
-        tab.rowconfigure(2, weight=1)
-        self.tabs.add(tab, text="Disk Usage")
-        self.tab_disk = tab
+        service_scroller = Gtk.ScrolledWindow()
+        service_scroller.set_hexpand(True)
+        service_scroller.set_vexpand(True)
+        services_frame.set_child(service_scroller)
 
-        controls = tk.Frame(tab, padx=12, pady=10)
-        controls.grid(row=0, column=0, sticky="ew")
+        self.service_list = Gtk.ListBox()
+        self.service_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self.service_list.connect("row-selected", self._on_service_row_selected)
+        service_scroller.set_child(self.service_list)
 
-        self.lbl_path = tk.Label(controls, text="Path", font=("Adwaita Sans", 10, "bold"))
-        self.lbl_path.pack(side="left")
-        self.entry_path = tk.Entry(controls, textvariable=self.scan_path_var, font=("Adwaita Sans", 10), width=56)
-        self.entry_path.pack(side="left", padx=(6, 8))
+        action_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        tab.append(action_row)
+        for action in ("start", "stop", "restart", "enable", "disable"):
+            btn = Gtk.Button(label=action.title())
+            btn.connect("clicked", lambda _b, a=action: self._do_service_action(a))
+            action_row.append(btn)
 
-        self.btn_browse = self._add_btn(RoundedButton(controls, "Browse", self._browse_path, width=90))
-        self.btn_browse.pack(side="left", padx=(0, 8))
+        logs_btn = Gtk.Button(label="Show Logs")
+        logs_btn.connect("clicked", lambda _b: self.show_selected_logs())
+        action_row.append(logs_btn)
 
-        self.chk_hidden = tk.Checkbutton(controls, text="Show hidden", variable=self.show_hidden_var, onvalue=True, offvalue=False, font=("Adwaita Sans", 10), command=self._save_disk_settings)
-        self.chk_hidden.pack(side="left", padx=(0, 8))
+        logs_frame = Gtk.Frame(label="Logs")
+        split.set_end_child(logs_frame)
 
-        self.btn_scan = self._add_btn(RoundedButton(controls, "Scan", self.scan_disk, width=90))
-        self.btn_scan.pack(side="left")
+        logs_scroller = Gtk.ScrolledWindow()
+        logs_scroller.set_hexpand(True)
+        logs_scroller.set_vexpand(True)
+        logs_frame.set_child(logs_scroller)
 
-        self.disk_summary = tk.Label(tab, text="", font=("Adwaita Sans", 10), anchor="w", padx=12)
-        self.disk_summary.grid(row=1, column=0, sticky="ew")
+        self.logs_view = Gtk.TextView()
+        self.logs_view.set_editable(False)
+        self.logs_view.set_monospace(True)
+        logs_scroller.set_child(self.logs_view)
 
-        body = tk.Frame(tab, padx=12, pady=6)
-        body.grid(row=2, column=0, sticky="nsew")
-        body.columnconfigure(0, weight=1)
-        body.columnconfigure(1, weight=1)
-        body.rowconfigure(0, weight=1)
-        self.disk_body = body
+        return tab
 
-        left = tk.LabelFrame(body, text="Top-Level Usage", padx=8, pady=8)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-        left.columnconfigure(0, weight=1)
-        left.rowconfigure(0, weight=1)
-        self.disk_left = left
+    def _build_disk_tab(self) -> Gtk.Widget:
+        tab = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        tab.set_margin_top(10)
+        tab.set_margin_bottom(10)
+        tab.set_margin_start(10)
+        tab.set_margin_end(10)
 
-        self.top_tree = ttk.Treeview(left, columns=("name", "type", "size"), show="headings", style="App.Treeview")
-        self.top_tree.heading("name", text="Name")
-        self.top_tree.heading("type", text="Type")
-        self.top_tree.heading("size", text="Size")
-        self.top_tree.column("name", width=360, anchor="w")
-        self.top_tree.column("type", width=80, anchor="w")
-        self.top_tree.column("size", width=120, anchor="e")
-        self.top_tree.grid(row=0, column=0, sticky="nsew")
-        s3 = ttk.Scrollbar(left, orient="vertical", command=self.top_tree.yview)
-        self.top_tree.configure(yscrollcommand=s3.set)
-        s3.grid(row=0, column=1, sticky="ns")
+        controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        tab.append(controls)
 
-        right = tk.LabelFrame(body, text="Largest Files", padx=8, pady=8)
-        right.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
-        right.columnconfigure(0, weight=1)
-        right.rowconfigure(0, weight=1)
-        self.disk_right = right
+        controls.append(Gtk.Label(label="Path"))
+        self.path_entry = Gtk.Entry()
+        self.path_entry.set_hexpand(True)
+        self.path_entry.set_text(str(self.settings.get("scan_path", str(Path.home()))))
+        self.path_entry.connect("activate", lambda _e: self.scan_disk())
+        controls.append(self.path_entry)
 
-        self.files_tree = ttk.Treeview(right, columns=("path", "size"), show="headings", style="App.Treeview")
-        self.files_tree.heading("path", text="Path")
-        self.files_tree.heading("size", text="Size")
-        self.files_tree.column("path", width=480, anchor="w")
-        self.files_tree.column("size", width=120, anchor="e")
-        self.files_tree.grid(row=0, column=0, sticky="nsew")
-        s4 = ttk.Scrollbar(right, orient="vertical", command=self.files_tree.yview)
-        self.files_tree.configure(yscrollcommand=s4.set)
-        s4.grid(row=0, column=1, sticky="ns")
+        controls.append(Gtk.Label(label="Show hidden"))
+        self.hidden_switch = Gtk.Switch()
+        self.hidden_switch.set_active(bool(self.settings.get("show_hidden", False)))
+        self.hidden_switch.connect("notify::active", self._on_hidden_switch_changed)
+        controls.append(self.hidden_switch)
 
-    def _build_package_tab(self):
-        tab = tk.Frame(self.tabs)
-        tab.columnconfigure(0, weight=1)
-        tab.rowconfigure(1, weight=1)
-        self.tabs.add(tab, text="Package Audit")
-        self.tab_pkg = tab
+        scan_btn = Gtk.Button(label="Scan")
+        scan_btn.connect("clicked", lambda _b: self.scan_disk())
+        controls.append(scan_btn)
 
-        controls = tk.Frame(tab, padx=12, pady=10)
-        controls.grid(row=0, column=0, sticky="ew")
+        self.disk_summary_label = Gtk.Label(label="")
+        self.disk_summary_label.set_xalign(0.0)
+        self.disk_summary_label.add_css_class("dim-label")
+        tab.append(self.disk_summary_label)
 
-        self.btn_pkg_refresh = self._add_btn(RoundedButton(controls, "Refresh Audit", self.refresh_packages, width=126))
-        self.btn_pkg_refresh.pack(side="left")
+        split = Gtk.Paned.new(Gtk.Orientation.HORIZONTAL)
+        split.set_hexpand(True)
+        split.set_vexpand(True)
+        tab.append(split)
 
-        self.btn_system_upgrade = self._add_btn(RoundedButton(controls, "Run System Upgrade", self._run_system_upgrade, width=172))
-        self.btn_system_upgrade.pack(side="left", padx=(8, 0))
+        top_frame = Gtk.Frame(label="Top-Level Usage")
+        split.set_start_child(top_frame)
 
-        self.btn_flatpak_upgrade = self._add_btn(RoundedButton(controls, "Run Flatpak Update", self._run_flatpak_upgrade, width=172))
-        self.btn_flatpak_upgrade.pack(side="left", padx=(8, 0))
+        top_scroller = Gtk.ScrolledWindow()
+        top_scroller.set_hexpand(True)
+        top_scroller.set_vexpand(True)
+        top_frame.set_child(top_scroller)
 
-        self.btn_cleanup = self._add_btn(RoundedButton(controls, "Run Cleanup", self._run_cleanup, width=120))
-        self.btn_cleanup.pack(side="left", padx=(8, 0))
+        self.disk_top_view = Gtk.TextView()
+        self.disk_top_view.set_editable(False)
+        self.disk_top_view.set_monospace(True)
+        top_scroller.set_child(self.disk_top_view)
 
-        self.pkg_detected = tk.Label(controls, text="Managers: -", font=("Adwaita Sans", 10))
-        self.pkg_detected.pack(side="left", padx=(12, 0))
+        files_frame = Gtk.Frame(label="Largest Files")
+        split.set_end_child(files_frame)
 
-        body = tk.Frame(tab, padx=12, pady=6)
-        body.grid(row=1, column=0, sticky="nsew")
-        body.columnconfigure(0, weight=1)
-        body.rowconfigure(0, weight=1)
-        self.pkg_body = body
+        files_scroller = Gtk.ScrolledWindow()
+        files_scroller.set_hexpand(True)
+        files_scroller.set_vexpand(True)
+        files_frame.set_child(files_scroller)
 
-        self.pkg_text = tk.Text(body, wrap="word", font=("Adwaita Mono", 10), state="disabled")
-        self.pkg_text.grid(row=0, column=0, sticky="nsew")
-        s5 = ttk.Scrollbar(body, orient="vertical", command=self.pkg_text.yview)
-        self.pkg_text.configure(yscrollcommand=s5.set)
-        s5.grid(row=0, column=1, sticky="ns")
+        self.disk_files_view = Gtk.TextView()
+        self.disk_files_view.set_editable(False)
+        self.disk_files_view.set_monospace(True)
+        files_scroller.set_child(self.disk_files_view)
+
+        return tab
+
+    def _build_packages_tab(self) -> Gtk.Widget:
+        tab = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        tab.set_margin_top(10)
+        tab.set_margin_bottom(10)
+        tab.set_margin_start(10)
+        tab.set_margin_end(10)
+
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        tab.append(actions)
+
+        refresh_btn = Gtk.Button(label="Refresh Audit")
+        refresh_btn.connect("clicked", lambda _b: self.refresh_packages())
+        actions.append(refresh_btn)
+
+        self.btn_system_upgrade = Gtk.Button(label="System Upgrade")
+        self.btn_system_upgrade.connect("clicked", lambda _b: self._run_system_upgrade())
+        actions.append(self.btn_system_upgrade)
+
+        self.btn_flatpak_upgrade = Gtk.Button(label="Flatpak Update")
+        self.btn_flatpak_upgrade.connect("clicked", lambda _b: self._run_flatpak_upgrade())
+        actions.append(self.btn_flatpak_upgrade)
+
+        self.btn_cleanup = Gtk.Button(label="Cleanup")
+        self.btn_cleanup.connect("clicked", lambda _b: self._run_cleanup())
+        actions.append(self.btn_cleanup)
+
+        self.pkg_detected_label = Gtk.Label(label="Managers: -")
+        self.pkg_detected_label.set_xalign(0.0)
+        self.pkg_detected_label.add_css_class("dim-label")
+        tab.append(self.pkg_detected_label)
+
+        pkg_scroller = Gtk.ScrolledWindow()
+        pkg_scroller.set_hexpand(True)
+        pkg_scroller.set_vexpand(True)
+        tab.append(pkg_scroller)
+
+        self.pkg_view = Gtk.TextView()
+        self.pkg_view.set_editable(False)
+        self.pkg_view.set_monospace(True)
+        pkg_scroller.set_child(self.pkg_view)
+
+        return tab
+
+    def _set_status(self, text: str):
+        if self.status_label is not None:
+            self.status_label.set_text(text)
+
+    def _set_text(self, view: Gtk.TextView | None, text: str):
+        if view is None:
+            return
+        view.get_buffer().set_text(text)
+
+    def _on_theme_changed(self, dropdown: Gtk.DropDown, _param):
+        self._apply_theme(self._get_dropdown_value(dropdown, self.theme_values))
+
+    def _apply_theme(self, theme_name: str):
+        if theme_name not in {"dark", "light"}:
+            theme_name = "dark"
+        self.settings["theme"] = theme_name
+        save_settings(self.settings)
+
+        gtk_settings = Gtk.Settings.get_default()
+        if gtk_settings is not None:
+            gtk_settings.set_property("gtk-application-prefer-dark-theme", theme_name == "dark")
 
     def _save_service_settings(self):
-        self.settings["service_search"] = self.service_search_var.get()
-        self.settings["service_state_filter"] = self.service_state_var.get()
+        if self.service_search_entry is not None:
+            self.settings["service_search"] = self.service_search_entry.get_text().strip()
+        if self.service_state_dropdown is not None:
+            self.settings["service_state_filter"] = self._get_dropdown_value(
+                self.service_state_dropdown,
+                self.service_state_values,
+            )
         save_settings(self.settings)
 
     def _save_disk_settings(self):
-        self.settings["scan_path"] = self.scan_path_var.get()
-        self.settings["show_hidden"] = bool(self.show_hidden_var.get())
+        if self.path_entry is not None:
+            self.settings["scan_path"] = self.path_entry.get_text().strip()
+        if self.hidden_switch is not None:
+            self.settings["show_hidden"] = bool(self.hidden_switch.get_active())
         save_settings(self.settings)
 
-    def _selected_service(self) -> str:
-        sel = self.service_tree.selection()
-        if not sel:
-            return ""
-        values = self.service_tree.item(sel[0], "values")
-        return str(values[0]) if values else ""
+    def _on_hidden_switch_changed(self, _switch: Gtk.Switch, _param):
+        self._save_disk_settings()
 
-    def _set_logs_text(self, text: str):
-        self.logs_text.configure(state="normal")
-        self.logs_text.delete("1.0", tk.END)
-        self.logs_text.insert("1.0", text)
-        self.logs_text.configure(state="disabled")
+    def _selected_service(self) -> str:
+        if self.service_list is None:
+            return ""
+        row = self.service_list.get_selected_row()
+        if row is None:
+            return ""
+        return self.service_row_units.get(row.get_name() or "", "")
 
     def refresh_services(self):
-        self._save_service_settings()
-
         if not has_systemd():
-            self.status_var.set("systemctl not available on this system")
-            for node in self.service_tree.get_children():
-                self.service_tree.delete(node)
-            self._set_logs_text("systemd is not available on this system.")
+            self._set_text(self.logs_view, "systemctl is not available on this machine.")
+            self._set_status("systemctl not found")
             return
 
-        self.status_var.set("Refreshing service list...")
+        self._save_service_settings()
+        search = self.settings.get("service_search", "")
+        state_filter = self.settings.get("service_state_filter", "all")
+
+        self._set_status("Refreshing services...")
 
         def task():
-            rows = list_services(self.service_search_var.get(), self.service_state_var.get())
-            self.root.after(0, lambda: self._render_services(rows))
+            rows = list_services(str(search), str(state_filter))
+            GLib.idle_add(self._render_services, rows)
 
         threading.Thread(target=task, daemon=True).start()
 
     def _render_services(self, rows):
-        for node in self.service_tree.get_children():
-            self.service_tree.delete(node)
+        if self.service_list is None:
+            return False
 
-        for i, row in enumerate(rows):
-            self.service_tree.insert("", "end", iid=f"svc-{i}", values=(row.unit, row.load, row.active, row.sub, row.description))
+        self._clear_listbox(self.service_list)
+        self.service_row_units.clear()
 
-        self.status_var.set(f"Loaded {len(rows)} services")
+        for idx, row_data in enumerate(rows):
+            row = Gtk.ListBoxRow()
+            text = f"{row_data.unit} | {row_data.active}/{row_data.sub} | {row_data.description}"
+            label = Gtk.Label(label=text, xalign=0.0)
+            label.set_selectable(False)
+            row.set_child(label)
+            row_key = f"service-{idx}"
+            row.set_name(row_key)
+            self.service_row_units[row_key] = row_data.unit
+            self.service_list.append(row)
+
+        self._set_status(f"Loaded {len(rows)} services")
+        return False
+
+    def _on_service_row_selected(self, _listbox: Gtk.ListBox, row: Gtk.ListBoxRow | None):
+        if row is None:
+            return
+        unit = self.service_row_units.get(row.get_name() or "", "")
+        if unit:
+            self._set_status(f"Selected service: {unit}")
 
     def _do_service_action(self, action: str):
         unit = self._selected_service()
         if not unit:
-            messagebox.showinfo("Service Action", "Select a service first.")
+            self._set_status("Select a service first")
             return
 
-        self.status_var.set(f"Running '{action}' on {unit}...")
+        self._set_status(f"Running {action} on {unit}...")
 
         def task():
             ok, msg = run_service_action(action, unit)
-            self.root.after(0, lambda: self._on_service_action_done(ok, msg))
+            GLib.idle_add(self._on_service_action_done, ok, msg)
 
         threading.Thread(target=task, daemon=True).start()
 
     def _on_service_action_done(self, ok: bool, msg: str):
-        if ok:
-            self.status_var.set(msg)
-            self.refresh_services()
-            return
-        self.status_var.set("Service action failed")
-        messagebox.showerror("Service Action Failed", msg)
+        self._set_status(msg)
+        if not ok:
+            self._set_text(self.logs_view, msg)
+        self.refresh_services()
+        return False
 
     def show_selected_logs(self):
         unit = self._selected_service()
         if not unit:
-            messagebox.showinfo("Service Logs", "Select a service first.")
+            self._set_status("Select a service first")
             return
 
-        self.status_var.set(f"Loading logs for {unit}...")
+        self._set_status(f"Loading logs for {unit}...")
 
         def task():
             logs = read_service_logs(unit)
-            self.root.after(0, lambda: self._on_logs_ready(unit, logs))
+            GLib.idle_add(self._on_logs_ready, unit, logs)
 
         threading.Thread(target=task, daemon=True).start()
 
     def _on_logs_ready(self, unit: str, logs: str):
-        self._set_logs_text(logs)
-        self.status_var.set(f"Showing logs for {unit}")
-
-    def _browse_path(self):
-        start = Path(self.scan_path_var.get()).expanduser()
-        if not start.exists():
-            start = Path.home()
-        selected = filedialog.askdirectory(initialdir=str(start))
-        if not selected:
-            return
-        self.scan_path_var.set(selected)
-        self._save_disk_settings()
+        self._set_text(self.logs_view, logs)
+        self._set_status(f"Logs loaded for {unit}")
+        return False
 
     def scan_disk(self):
         self._save_disk_settings()
-        path = self.scan_path_var.get().strip()
-        show_hidden = bool(self.show_hidden_var.get())
+        path = str(self.settings.get("scan_path", str(Path.home()))).strip()
+        show_hidden = bool(self.settings.get("show_hidden", False))
 
-        self.status_var.set(f"Scanning disk usage for {path}...")
+        self._set_status("Scanning disk...")
 
         def task():
             try:
                 top, files, root = scan_disk(path, show_hidden=show_hidden)
+                GLib.idle_add(self._render_disk, root, top, files)
             except Exception as exc:  # noqa: BLE001
-                self.root.after(0, lambda: self._on_disk_failed(str(exc)))
-                return
-            self.root.after(0, lambda: self._render_disk(root, top, files))
+                GLib.idle_add(self._on_disk_failed, str(exc))
 
         threading.Thread(target=task, daemon=True).start()
 
     def _on_disk_failed(self, reason: str):
-        self.status_var.set("Disk scan failed")
-        messagebox.showerror("Disk Scan Failed", reason)
+        self._set_status(f"Disk scan failed: {reason}")
+        return False
 
     def _render_disk(self, root: Path, top, files):
-        for node in self.top_tree.get_children():
-            self.top_tree.delete(node)
-        for node in self.files_tree.get_children():
-            self.files_tree.delete(node)
+        top_lines = [f"{item.item_type:>4}  {human_size(item.size):>10}  {item.path.name}" for item in top[:250]]
+        file_lines = [f"{human_size(item.size):>10}  {item.path}" for item in files[:250]]
 
-        for i, item in enumerate(top[:300]):
-            self.top_tree.insert("", "end", iid=f"top-{i}", values=(item.path.name, item.item_type, human_size(item.size)))
+        self._set_text(self.disk_top_view, "\n".join(top_lines) if top_lines else "No data")
+        self._set_text(self.disk_files_view, "\n".join(file_lines) if file_lines else "No data")
 
-        for i, item in enumerate(files[:300]):
-            self.files_tree.insert("", "end", iid=f"file-{i}", values=(str(item.path), human_size(item.size)))
-
-        self.disk_summary.configure(text=f"Scanned: {root} | Top-level items: {len(top)} | Largest files listed: {len(files)}")
-        self.status_var.set("Disk scan complete")
+        if self.disk_summary_label is not None:
+            self.disk_summary_label.set_text(
+                f"Scanned: {root} | Top-level items: {len(top)} | Largest files listed: {len(files)}"
+            )
+        self._set_status("Disk scan complete")
+        return False
 
     def refresh_packages(self):
-        self.status_var.set("Running package audit...")
+        self._set_status("Running package audit...")
 
         def task():
             managers = detect_managers()
             results = audit_all()
-            self.root.after(0, lambda: self._render_package_audit(managers, results))
+            GLib.idle_add(self._render_package_audit, managers, results)
 
         threading.Thread(target=task, daemon=True).start()
 
     def _render_package_audit(self, managers, results):
-        self.managers = managers
-        self.pkg_detected.configure(text=f"Managers: {', '.join(managers) if managers else 'none'}")
+        self.managers = list(managers)
+        if self.pkg_detected_label is not None:
+            self.pkg_detected_label.set_text(f"Managers: {', '.join(self.managers) if self.managers else 'none'}")
 
-        lines = []
+        lines: list[str] = []
         for result in results:
             lines.append(f"[{result.manager}] {result.summary}")
             lines.append(result.details)
-            lines.append("-" * 70)
+            lines.append("-" * 72)
         text = "\n".join(lines) if lines else "No supported package managers detected."
+        self._set_text(self.pkg_view, text)
 
-        self.pkg_text.configure(state="normal")
-        self.pkg_text.delete("1.0", tk.END)
-        self.pkg_text.insert("1.0", text)
-        self.pkg_text.configure(state="disabled")
+        if self.btn_system_upgrade is not None:
+            self.btn_system_upgrade.set_sensitive(bool(recommended_system_upgrade(self.managers)))
+        if self.btn_cleanup is not None:
+            self.btn_cleanup.set_sensitive(bool(recommended_cleanup(self.managers)))
+        if self.btn_flatpak_upgrade is not None:
+            self.btn_flatpak_upgrade.set_sensitive("flatpak" in self.managers)
 
-        self.btn_system_upgrade.set_enabled(bool(recommended_system_upgrade(self.managers)))
-        self.btn_cleanup.set_enabled(bool(recommended_cleanup(self.managers)))
-        self.btn_flatpak_upgrade.set_enabled("flatpak" in self.managers)
-
-        self.status_var.set("Package audit complete")
+        self._set_status("Package audit complete")
+        return False
 
     def _run_system_upgrade(self):
         cmd = recommended_system_upgrade(self.managers)
         if not cmd:
-            messagebox.showinfo("System Upgrade", "No supported system package manager detected.")
+            self._set_status("No supported system package manager detected")
             return
         ok, msg = launch_in_terminal(cmd, title="System Upgrade")
-        if ok:
-            self.status_var.set(msg)
-        else:
-            self.status_var.set("Failed to launch system upgrade")
-            messagebox.showerror("System Upgrade", msg)
+        self._set_status(msg if ok else f"System upgrade launch failed: {msg}")
 
     def _run_flatpak_upgrade(self):
         if "flatpak" not in self.managers:
-            messagebox.showinfo("Flatpak Update", "Flatpak is not detected on this system.")
+            self._set_status("Flatpak is not detected on this system")
             return
         ok, msg = launch_in_terminal("flatpak update", title="Flatpak Update")
-        if ok:
-            self.status_var.set(msg)
-        else:
-            self.status_var.set("Failed to launch Flatpak update")
-            messagebox.showerror("Flatpak Update", msg)
+        self._set_status(msg if ok else f"Flatpak launch failed: {msg}")
 
     def _run_cleanup(self):
         cmd = recommended_cleanup(self.managers)
         if not cmd:
-            messagebox.showinfo("Cleanup", "No cleanup command available for detected managers.")
+            self._set_status("No cleanup command available")
             return
         ok, msg = launch_in_terminal(cmd, title="Package Cleanup")
-        if ok:
-            self.status_var.set(msg)
-        else:
-            self.status_var.set("Failed to launch cleanup")
-            messagebox.showerror("Cleanup", msg)
+        self._set_status(msg if ok else f"Cleanup launch failed: {msg}")
 
-    def apply_theme(self, theme_name: str):
-        if theme_name not in THEMES:
-            theme_name = "dark"
+    @staticmethod
+    def _set_dropdown_value(dropdown: Gtk.DropDown, values: list[str], value: str):
+        try:
+            idx = values.index(value)
+        except ValueError:
+            idx = 0
+        dropdown.set_selected(idx)
 
-        self.theme_var.set(theme_name)
-        self.settings["theme"] = theme_name
-        save_settings(self.settings)
+    @staticmethod
+    def _get_dropdown_value(dropdown: Gtk.DropDown, values: list[str]) -> str:
+        idx = int(dropdown.get_selected())
+        if 0 <= idx < len(values):
+            return values[idx]
+        return values[0]
 
-        p = THEMES[theme_name]
-
-        self.style.configure("App.TCombobox", fieldbackground=p["entry"], foreground=p["entry_fg"], bordercolor=p["line"], padding=4, font=("Adwaita Sans", 10))
-        self.style.map("App.TCombobox", fieldbackground=[("readonly", p["entry"])], foreground=[("readonly", p["entry_fg"])])
-        self.style.configure("App.Treeview", background=p["card"], fieldbackground=p["card"], foreground=p["text"], rowheight=28, borderwidth=0, font=("Adwaita Sans", 10))
-        self.style.map("App.Treeview", background=[("selected", p["select"])], foreground=[("selected", p["text"])])
-
-        self.root.configure(bg=p["root"])
-        self.header.configure(bg=p["root"])
-        self.title.configure(bg=p["root"], fg=p["text"])
-        self.subtitle.configure(bg=p["root"], fg=p["muted"])
-        self.status.configure(bg=p["root"], fg=p["muted"])
-
-        # Service tab widgets
-        for w in (self.tab_systemd, self.logs_frame):
-            w.configure(bg=p["panel"], fg=p["text"]) if isinstance(w, tk.LabelFrame) else w.configure(bg=p["panel"])
-        self.lbl_search.configure(bg=p["panel"], fg=p["text"])
-        self.lbl_state.configure(bg=p["panel"], fg=p["text"])
-        self.entry_service_search.configure(bg=p["entry"], fg=p["entry_fg"], insertbackground=p["entry_fg"], relief="flat")
-        self.logs_text.configure(bg=p["card"], fg=p["text"], insertbackground=p["text"])
-
-        # Disk tab widgets
-        self.tab_disk.configure(bg=p["panel"])
-        self.lbl_path.configure(bg=p["panel"], fg=p["text"])
-        self.entry_path.configure(bg=p["entry"], fg=p["entry_fg"], insertbackground=p["entry_fg"], relief="flat")
-        self.chk_hidden.configure(bg=p["panel"], fg=p["text"], selectcolor=p["panel"], activebackground=p["panel"], activeforeground=p["text"])
-        self.disk_summary.configure(bg=p["panel"], fg=p["muted"])
-        self.disk_body.configure(bg=p["panel"])
-        self.disk_left.configure(bg=p["panel"], fg=p["text"])
-        self.disk_right.configure(bg=p["panel"], fg=p["text"])
-
-        # Package tab widgets
-        self.tab_pkg.configure(bg=p["panel"])
-        self.pkg_body.configure(bg=p["panel"])
-        self.pkg_detected.configure(bg=p["panel"], fg=p["muted"])
-        self.pkg_text.configure(bg=p["card"], fg=p["text"], insertbackground=p["text"])
-
-        for btn in self.round_buttons:
-            btn.configure_theme(p, btn.master.cget("bg"))
+    @staticmethod
+    def _clear_listbox(box: Gtk.ListBox):
+        child = box.get_first_child()
+        while child is not None:
+            nxt = child.get_next_sibling()
+            box.remove(child)
+            child = nxt
